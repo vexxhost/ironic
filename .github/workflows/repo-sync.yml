@@ -1,0 +1,28 @@
+name: Synchronize repository
+
+on:
+  schedule: 
+  - cron: "*/15 * * * *"
+
+jobs:
+  master:
+    name: master
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Synchronize repository
+      uses: repo-sync/github-sync@v2
+      with:
+        source_repo: https://opendev.org/openstack/ironic
+        source_branch: stable/ussuri
+        destination_branch: upstream/ussuri
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Create pull request
+      uses: repo-sync/pull-request@v2
+      with:
+        source_branch: upstream/ussuri
+        destination_branch: stable/ussuri
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        pr_title: "Pulling ${{ github.ref }} into stable/ussuri"
+        pr_body: ":crown: *An automated PR*"
+        pr_reviewer: "mnaser"
