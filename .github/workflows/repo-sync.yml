@@ -5,8 +5,8 @@ on:
   - cron: "*/15 * * * *"
 
 jobs:
-  master:
-    name: master
+  ussuri:
+    name: ussuri
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
