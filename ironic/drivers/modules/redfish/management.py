@@ -81,12 +81,26 @@ def _set_boot_device(task, system, device, persistent=False):
                        Default: False.
     :raises: SushyError on an error from the Sushy library
     """
-    desired_enabled = BOOT_DEVICE_PERSISTENT_MAP_REV[persistent]
-    current_enabled = system.boot.get('enabled')
 
-    # NOTE(etingof): this can be racy, esp if BMC is not RESTful
-    enabled = (desired_enabled
-               if desired_enabled != current_enabled else None)
+    # The BMC handling of the persistent setting is vendor specific.
+    # Some vendors require that it not be set if currently equal to
+    # desired state (see https://storyboard.openstack.org/#!/story/2007355).
+    # Supermicro BMCs handle it in the opposite manner - the
+    # persistent setting must be set when setting the boot device
+    # (see https://storyboard.openstack.org/#!/story/2008547).
+    vendor = task.node.properties.get('vendor', None)
+    if vendor and vendor.lower() == 'supermicro':
+        enabled = BOOT_DEVICE_PERSISTENT_MAP_REV[persistent]
+        LOG.debug('Setting BootSourceOverrideEnable to %(enable)s '
+                  'on Supermicro BMC, node %(node)s',
+                  {'enable': enabled, 'node': task.node.uuid})
+    else:
+        desired_enabled = BOOT_DEVICE_PERSISTENT_MAP_REV[persistent]
+        current_enabled = system.boot.get('enabled')
+
+        # NOTE(etingof): this can be racy, esp if BMC is not RESTful
+        enabled = (desired_enabled
+                   if desired_enabled != current_enabled else None)
 
     try:
         system.set_system_boot_options(device, enabled=enabled)
@@ -217,7 +231,12 @@ class RedfishManagement(base.ManagementInterface):
 
         # Ensure that boot mode is synced with what is set.
         # Some BMCs reset it to default (BIOS) when changing the boot device.
-        boot_mode_utils.sync_boot_mode(task)
+        # It should only be synced on these vendors as other vendor
+        # implementations will result in an error
+        # (see https://storyboard.openstack.org/#!/story/2008712)
+        vendor = task.node.properties.get('vendor', None)
+        if vendor and vendor.lower() == 'supermicro':
+            boot_mode_utils.sync_boot_mode(task)
 
     def get_boot_device(self, task):
         """Get the current boot device for a node.
@@ -281,6 +300,19 @@ class RedfishManagement(base.ManagementInterface):
                          {'node': task.node.uuid, 'mode': mode,
                           'error': e})
             LOG.error(error_msg)
+
+            # NOTE(sbaker): Some systems such as HPE Gen9 do not support
+            # getting or setting the boot mode. When setting failed and the
+            # mode attribute is missing from the boot field, raising
+            # UnsupportedDriverExtension will allow the deploy to continue.
+            if system.boot.get('mode') is None:
+                LOG.info(_('Attempt to set boot mode on node %(node)s '
+                           'failed to set boot mode as the node does not '
+                           'appear to support overriding the boot mode. '
+                           'Possibly partial Redfish implementation?'),
+                         {'node': task.node.uuid})
+                raise exception.UnsupportedDriverExtension(
+                    driver=task.node.driver, extension='set_boot_mode')
             raise exception.RedfishError(error=error_msg)
 
     def get_boot_mode(self, task):
@@ -668,3 +700,18 @@ class RedfishManagement(base.ManagementInterface):
             "node %(uuid)s") % {'indicator': indicator,
                                 'component': component,
                                 'uuid': task.node.uuid})
+
+    def detect_vendor(self, task):
+        """Detects and returns the hardware vendor.
+
+        Uses the System's Manufacturer field.
+
+        :param task: A task from TaskManager.
+        :raises: InvalidParameterValue if an invalid component, indicator
+            or state is specified.
+        :raises: MissingParameterValue if a required parameter is missing
+        :raises: RedfishError on driver-specific problems.
+        :returns: String representing the BMC reported Vendor or
+                  Manufacturer, otherwise returns None.
+        """
+        return redfish_utils.get_system(task.node).manufacturer
